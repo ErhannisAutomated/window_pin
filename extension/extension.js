@@ -20,6 +20,11 @@ const DBUS_IFACE = `<node>
   </interface>
 </node>`;
 
+// Try to get an X11/XWayland window ID (returns 0 for native Wayland windows).
+function _getXWindowId(metaWindow) {
+    try { return metaWindow.get_xwindow(); } catch { return 0; }
+}
+
 export default class WindowPinExtension extends Extension {
     enable() {
         this._dbusImpl = Gio.DBusExportedObject.wrapJSObject(DBUS_IFACE, this);
@@ -60,6 +65,8 @@ export default class WindowPinExtension extends Extension {
             wm_class: w.get_wm_class() || '',
             title: w.get_title() || '',
             workspace: w.get_workspace().index(),
+            stable_sequence: w.get_stable_sequence(),
+            window_id: _getXWindowId(w),
         }));
 
         GLib.mkdir_with_parents(this._stateDir(), 0o755);
@@ -69,7 +76,7 @@ export default class WindowPinExtension extends Extension {
         );
 
         const lines = windows.map(
-            w => `  [ws ${w.workspace}] ${w.wm_class}: ${w.title}`
+            w => `  [ws ${w.workspace}] ${w.wm_class}: ${w.title}  (seq=${w.stable_sequence}, xid=${w.window_id})`
         );
         return `Saved ${windows.length} window(s)\n${lines.join('\n')}`;
     }
@@ -103,33 +110,84 @@ export default class WindowPinExtension extends Extension {
         const matchedSaved = new Set();
         const matchedCur = new Set();
         const actions = [];
+        const logs = [];
 
-        // Pass 1 - exact match on class + title
+        // Pass 1 — match on class + title, with ID tie-breakers for duplicates
         for (let s = 0; s < saved.length; s++) {
+            if (matchedSaved.has(s)) continue;
+
+            // Collect all unmatched current windows with same class + title
+            const candidates = [];
             for (let c = 0; c < current.length; c++) {
                 if (matchedCur.has(c)) continue;
                 const w = current[c];
                 if (
                     w.get_wm_class() === saved[s].wm_class &&
                     w.get_title() === saved[s].title
-                ) {
-                    if (w.get_workspace().index() !== saved[s].workspace) {
-                        w.change_workspace_by_index(
-                            saved[s].workspace,
-                            false
+                )
+                    candidates.push(c);
+            }
+
+            if (candidates.length === 0) continue;
+
+            let pick;
+            let method = 'class+title';
+
+            if (candidates.length === 1) {
+                pick = candidates[0];
+            } else {
+                // Duplicate class+title — log it and try tie-breakers
+                logs.push(
+                    `  Duplicate: ${candidates.length}x "${saved[s].wm_class}" / "${saved[s].title}"`
+                );
+
+                // Tie-breaker 1: stable_sequence
+                const seqMatch = candidates.find(
+                    c => current[c].get_stable_sequence() === saved[s].stable_sequence
+                );
+                if (seqMatch !== undefined) {
+                    pick = seqMatch;
+                    method = 'stable_sequence';
+                    logs.push(
+                        `    -> resolved by stable_sequence (${saved[s].stable_sequence})`
+                    );
+                } else {
+                    // Tie-breaker 2: X window ID
+                    const savedXid = saved[s].window_id;
+                    const xidMatch =
+                        savedXid !== 0
+                            ? candidates.find(
+                                  c => _getXWindowId(current[c]) === savedXid
+                              )
+                            : undefined;
+                    if (xidMatch !== undefined) {
+                        pick = xidMatch;
+                        method = 'window_id';
+                        logs.push(
+                            `    -> resolved by window_id (${savedXid})`
                         );
-                        actions.push(
-                            `  ${saved[s].wm_class}: "${saved[s].title}" -> ws ${saved[s].workspace}`
+                    } else {
+                        pick = candidates[0];
+                        method = 'first-match';
+                        logs.push(
+                            '    -> no tie-breaker matched, using first match'
                         );
                     }
-                    matchedSaved.add(s);
-                    matchedCur.add(c);
-                    break;
                 }
             }
+
+            const w = current[pick];
+            if (w.get_workspace().index() !== saved[s].workspace) {
+                w.change_workspace_by_index(saved[s].workspace, false);
+                actions.push(
+                    `  ${saved[s].wm_class}: "${saved[s].title}" -> ws ${saved[s].workspace} (${method})`
+                );
+            }
+            matchedSaved.add(s);
+            matchedCur.add(pick);
         }
 
-        // Pass 2 - match by class only (handles changed titles, e.g.
+        // Pass 2 — match by class only (handles changed titles, e.g.
         // VSCode showing a different open file)
         for (let s = 0; s < saved.length; s++) {
             if (matchedSaved.has(s)) continue;
@@ -153,15 +211,21 @@ export default class WindowPinExtension extends Extension {
             }
         }
 
-        if (!actions.length)
-            return 'All windows already on their saved workspaces.';
-        return `Moved ${actions.length} window(s):\n${actions.join('\n')}`;
+        const parts = [];
+        if (logs.length)
+            parts.push(`Duplicates:\n${logs.join('\n')}`);
+        if (actions.length)
+            parts.push(`Moved ${actions.length} window(s):\n${actions.join('\n')}`);
+        else
+            parts.push('All windows already on their saved workspaces.');
+
+        return parts.join('\n\n');
     }
 
     ShowState() {
         const windows = this._normalWindows();
         const lines = windows.map(w =>
-            `  [ws ${w.get_workspace().index()}] ${w.get_wm_class()}: ${w.get_title()}`
+            `  [ws ${w.get_workspace().index()}] ${w.get_wm_class()}: ${w.get_title()}  (seq=${w.get_stable_sequence()}, xid=${_getXWindowId(w)})`
         );
         return `${windows.length} window(s):\n${lines.join('\n')}`;
     }
