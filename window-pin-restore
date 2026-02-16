@@ -1,0 +1,16 @@
+#!/bin/bash
+# Restore windows to the workspaces they were on when last saved.
+
+result=$(gdbus call --session \
+    --dest org.gnome.Shell \
+    --object-path /org/gnome/Shell/Extensions/WindowPin \
+    --method org.gnome.Shell.Extensions.WindowPin.RestoreState 2>&1)
+
+if [ $? -ne 0 ]; then
+    echo "Error: could not reach Window Pin extension." >&2
+    echo "Is the extension installed and enabled?" >&2
+    echo "  gnome-extensions list | grep window-pin" >&2
+    exit 1
+fi
+
+echo "$result" | sed "s/^('//; s/',)$//; s/\\\\n/\n/g"

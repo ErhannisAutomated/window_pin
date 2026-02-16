@@ -1,0 +1,17 @@
+#!/bin/bash
+# Save which workspace every window is currently on.
+
+result=$(gdbus call --session \
+    --dest org.gnome.Shell \
+    --object-path /org/gnome/Shell/Extensions/WindowPin \
+    --method org.gnome.Shell.Extensions.WindowPin.SaveState 2>&1)
+
+if [ $? -ne 0 ]; then
+    echo "Error: could not reach Window Pin extension." >&2
+    echo "Is the extension installed and enabled?" >&2
+    echo "  gnome-extensions list | grep window-pin" >&2
+    exit 1
+fi
+
+# gdbus wraps the return in ('...',) — strip that
+echo "$result" | sed "s/^('//; s/',)$//; s/\\\\n/\n/g"
