@@ -70,9 +70,11 @@ export default class WindowPinExtension extends Extension {
         }));
 
         GLib.mkdir_with_parents(this._stateDir(), 0o755);
+        // Explicitly encode to UTF-8 bytes so unicode titles are preserved
+        // correctly regardless of GJS version behaviour with string arguments.
         GLib.file_set_contents(
             this._stateFile(),
-            JSON.stringify(windows, null, 2)
+            new TextEncoder().encode(JSON.stringify(windows, null, 2))
         );
 
         const lines = windows.map(
@@ -123,7 +125,7 @@ export default class WindowPinExtension extends Extension {
                 const w = current[c];
                 if (
                     w.get_wm_class() === saved[s].wm_class &&
-                    w.get_title() === saved[s].title
+                    w.get_title().normalize('NFC') === saved[s].title.normalize('NFC')
                 )
                     candidates.push(c);
             }
